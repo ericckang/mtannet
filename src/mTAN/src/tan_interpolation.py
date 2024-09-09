@@ -11,40 +11,6 @@ import utils
 import pickle
 import os
 
-# Function to extract data from DataLoader
-def extract_data_from_dataloader(dataloader, dim):
-    all_t = []
-    all_x = []
-    all_m = []
-    
-    for batch in dataloader:
-        # If the batch is a tuple or list, the first element is usually the data
-        if isinstance(batch, (tuple, list)):
-            data = batch[0]
-        else:
-            data = batch
-        
-        if data.dim() == 3:
-            observed_data = data[:, :, :dim]  # X values
-            observed_mask = data[:, :, dim:2*dim]  # Mask
-            observed_tp = data[:, :, -1]  # Time
-        elif data.dim() == 2:
-            observed_data = data[:, :dim]  # X values
-            observed_mask = data[:, dim:2*dim]  # Mask
-            observed_tp = data[:, -1]  # Time
-        else:
-            raise ValueError(f"Unexpected data dimensions: {data.dim()}")
-
-        all_x.append(observed_data.numpy())
-        all_m.append(observed_mask.numpy())
-        all_t.append(observed_tp.numpy())
-        
-    all_t = np.concatenate(all_t, axis=0)
-    all_x = np.concatenate(all_x, axis=0)
-    all_m = np.concatenate(all_m, axis=0)
-    
-    return all_t, all_x, all_m
-
 parser = argparse.ArgumentParser()
 parser.add_argument('--niters', type=int, default=2000)
 parser.add_argument('--lr', type=float, default=0.01)
@@ -78,6 +44,8 @@ parser.add_argument('--dec-rnn', action='store_false')
 parser.add_argument('--sample-tp', type=float, default=1.0)
 parser.add_argument('--only-periodic', type=str, default=None)
 parser.add_argument('--dropout', type=float, default=0.0)
+parser.add_argument('--classify_pertp', action='store_true',
+                    help="Include per time-point classification loss")
 args = parser.parse_args()
 
 
@@ -108,38 +76,43 @@ if __name__ == '__main__':
 
     train_loader = data_obj["train_dataloader"]
     test_loader = data_obj["test_dataloader"]
-    val_loader = data_obj.get("val_dataloader", None)
+    if 'val_dataloader' in data_obj:
+        print("Validation data loaded.")
+    else:
+        val_loader = None
+        print("No validation data available.")
+    val_loader = data_obj["val_dataloader"]
     dim = data_obj["input_dim"]
 
     os.makedirs('data_origin', exist_ok=True)
      # Extract and save original data before model training
-    print("Extracting and saving original data (T, X, M)...")
-    T_train_orig, X_train_orig, M_train_orig = extract_data_from_dataloader(train_loader, dim)
-    T_test_orig, X_test_orig, M_test_orig = extract_data_from_dataloader(test_loader, dim)
-    if val_loader is not None:
-        T_val_orig, X_val_orig, M_val_orig = extract_data_from_dataloader(val_loader, dim)
-        np.save('data_origin/T_val.npy', T_val_orig)
-        np.save('data_origin/X_val.npy', X_val_orig)
-        np.save('data_origin/M_val.npy', M_val_orig)
-        print("T_val shape:", T_val_orig.shape)
-        print("X_val shape:", X_val_orig.shape)
-        print("M_val shape:", M_val_orig.shape)
+#    print("Extracting and saving original data (T, X, M)...")
+#    T_train_orig, X_train_orig, M_train_orig = extract_data_from_dataloader(train_loader, dim)
+#    T_test_orig, X_test_orig, M_test_orig = extract_data_from_dataloader(test_loader, dim)
+#    if val_loader is not None:
+#        T_val_orig, X_val_orig, M_val_orig = extract_data_from_dataloader(val_loader, dim)
+#        np.save('data_origin/T_val.npy', T_val_orig)
+#        np.save('data_origin/X_val.npy', X_val_orig)
+#        np.save('data_origin/M_val.npy', M_val_orig)
+#        print("T_val shape:", T_val_orig.shape)
+#        print("X_val shape:", X_val_orig.shape)
+#        print("M_val shape:", M_val_orig.shape)
 
-    np.save('data_origin/T_train.npy', T_train_orig)
-    np.save('data_origin/X_train.npy', X_train_orig)
-    np.save('data_origin/M_train.npy', M_train_orig)
-    np.save('data_origin/T_test.npy', T_test_orig)
-    np.save('data_origin/X_test.npy', X_test_orig)
-    np.save('data_origin/M_test.npy', M_test_orig)
+#    np.save('data_origin/T_train.npy', T_train_orig)
+#    np.save('data_origin/X_train.npy', X_train_orig)
+#    np.save('data_origin/M_train.npy', M_train_orig)
+#    np.save('data_origin/T_test.npy', T_test_orig)
+#    np.save('data_origin/X_test.npy', X_test_orig)
+#    np.save('data_origin/M_test.npy', M_test_orig)
 
-    print("T_train_orig shape:", T_train_orig.shape)
-    print("X_train_orig shape:", X_train_orig.shape)
-    print("M_train_orig shape:", M_train_orig.shape)
-    print("T_test_orig shape:", T_test_orig.shape)
-    print("X_test_orig shape:", X_test_orig.shape)
-    print("M_test_orig shape:", M_test_orig.shape)
+#    print("T_train_orig shape:", T_train_orig.shape)
+#    print("X_train_orig shape:", X_train_orig.shape)
+#    print("M_train_orig shape:", M_train_orig.shape)
+#    print("T_test_orig shape:", T_test_orig.shape)
+#    print("X_test_orig shape:", X_test_orig.shape)
+#    print("M_test_orig shape:", M_test_orig.shape)
 
-    print("done")
+ #   print("done")
 
     # model
     print("Initializing models...")
@@ -196,11 +169,24 @@ if __name__ == '__main__':
 
         for train_batch in train_loader:
             print("Processing batch...")
-            train_batch = train_batch.to(device)
+            #print("train_batch content:", train_batch)
+            data = train_batch[:, :, :-1]  # All features except the last one
+            labels = train_batch[:, :, -2].squeeze()  # The last feature
+
+            print(labels)
+            data = data.to(device)
+            labels = labels.to(device)
+            print(data.shape)
+            print(labels.shape)
+
             batch_len = train_batch.shape[0]
-            observed_data = train_batch[:, :, :dim]
-            observed_mask = train_batch[:, :, dim:2 * dim]
-            observed_tp = train_batch[:, :, -1]
+            print("train batch shape:", train_batch.shape)
+
+            observed_data = data[:, :, :dim]
+            observed_mask = data[:, :, dim:2 * dim]
+            observed_tp = data[:, :, -1]
+
+
             if args.sample_tp and args.sample_tp < 1:
                 subsampled_data, subsampled_tp, subsampled_mask = utils.subsample_timepoints(
                     observed_data.clone(), observed_tp.clone(), observed_mask.clone(), args.sample_tp)
@@ -252,62 +238,59 @@ if __name__ == '__main__':
     # Run the data through the trained model and capture the processed outputs
     def process_data_through_model(dataloader, model, decoder, dim):
         model.eval()
-        all_t = []
-        all_x = []
-        all_m = []
+        all_data = []
 
         with torch.no_grad():
-            for batch in dataloader:
-                batch = batch.to(device)
-                observed_data = batch[:, :, :dim]
-                observed_mask = batch[:, :, dim:2 * dim]
-                observed_tp = batch[:, :, -1]
-                
-                out = model(torch.cat((observed_data, observed_mask), 2), observed_tp)
-                qz0_mean = out[:, :, :args.latent_dim]
-                qz0_logvar = out[:, :, args.latent_dim:]
-                epsilon = torch.randn(
-                    1, qz0_mean.shape[0], qz0_mean.shape[1], qz0_mean.shape[2]
-                ).to(device)
-                z0 = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean
-                z0 = z0.view(-1, qz0_mean.shape[1], qz0_mean.shape[2])
-                pred_x = decoder(
-                    z0,
-                    observed_tp[None, :, :].repeat(1, 1, 1).view(-1, observed_tp.shape[1])
-                )
-                pred_x = pred_x.view(1, observed_data.shape[0], observed_data.shape[1], observed_data.shape[2]).mean(0)
-                
-                all_x.append(pred_x.cpu().numpy())
-                all_t.append(observed_tp.cpu().numpy())
-                all_m.append(observed_mask.cpu().numpy())
-        
-        all_t = np.concatenate(all_t, axis=0)
-        all_x = np.concatenate(all_x, axis=0)
-        all_m = np.concatenate(all_m, axis=0)
-        
-        return all_t, all_x, all_m
+            for record_id, train_batch in enumerate(dataloader):
+                batch_len = train_batch.shape[0]
 
-    T_train, X_train, M_train = process_data_through_model(train_loader, rec, dec, dim)
-    T_test, X_test, M_test = process_data_through_model(test_loader, rec, dec, dim)
-    if val_loader is not None:
-        T_val, X_val, M_val = process_data_through_model(val_loader, dim)
-        np.save('T_val.npy', T_val)
-        np.save('X_val.npy', X_val)
-        np.save('M_val.npy', M_val)
-        print("T_val shape:", T_val.shape)
-        print("X_val shape:", X_val.shape)
-        print("M_val shape:", M_val.shape)
+                # Assuming that the last feature is the label
+                data = train_batch[:, :, :-1]  # All features except the last one
+                labels = train_batch[:, :, -2].squeeze()  # Extract all labels (assuming label is the last feature)
 
-    np.save('T_train.npy', T_train)
-    np.save('X_train.npy', X_train)
-    np.save('M_train.npy', M_train)
-    np.save('T_test.npy', T_test)
-    np.save('X_test.npy', X_test)
-    np.save('M_test.npy', M_test)
+                # Move data and labels to the appropriate device
+                if labels is not None and len(labels) > 0:
+                    data = data.to(device)
+                    labels = labels.to(device)
 
-    print("T_train shape:", T_train.shape)
-    print("X_train shape:", X_train.shape)
-    print("M_train shape:", M_train.shape)
-    print("T_test shape:", T_test.shape)
-    print("X_test shape:", X_test.shape)
-    print("M_test shape:", M_test.shape)
+                    observed_data = data[:, :, :dim]
+                    observed_mask = data[:, :, dim:2 * dim]
+                    observed_tp = data[:, :, -1]
+
+                    out = model(torch.cat((observed_data, observed_mask), 2), observed_tp)
+                    qz0_mean = out[:, :, :args.latent_dim]
+                    qz0_logvar = out[:, :, args.latent_dim:]
+                    epsilon = torch.randn(
+                        1, qz0_mean.shape[0], qz0_mean.shape[1], qz0_mean.shape[2]
+                    ).to(device)
+                    z0 = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean
+                    z0 = z0.view(-1, qz0_mean.shape[1], qz0_mean.shape[2])
+
+                    pred_x = decoder(
+                        z0,
+                        observed_tp[None, :, :].repeat(1, 1, 1).view(-1, observed_tp.shape[1])
+                    )
+                    pred_x = pred_x.view(1, observed_data.shape[0], observed_data.shape[1], observed_data.shape[2]).mean(0)
+
+                    # Append structured data
+                    for i in range(batch_len):
+                        record = (record_id, observed_tp[i].cpu().numpy(), observed_data[i].cpu().numpy(), observed_mask[i].cpu().numpy(), labels[i].cpu().numpy())
+                        all_data.append(record)
+
+        return all_data
+
+
+    train_data = process_data_through_model(train_loader, rec, dec, dim)
+    test_data = process_data_through_model(test_loader, rec, dec, dim)
+    val_data = process_data_through_model(val_loader, rec, dec, dim) if val_loader else None
+
+    # Save the data
+    with open('train_data.pkl', 'wb') as f:
+        pickle.dump(train_data, f)
+    with open('test_data.pkl', 'wb') as f:
+        pickle.dump(test_data, f)
+    if val_data:
+        with open('val_data.pkl', 'wb') as f:
+            pickle.dump(val_data, f)
+
+    print("Data saved as train_data.pkl, test_data.pkl, and val_data.pkl.")

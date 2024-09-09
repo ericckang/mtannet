@@ -2,87 +2,83 @@ import torch
 import numpy as np
 import os
 import argparse
+import pickle
+from collections import Counter
 
 def pad_array(arr, max_len):
     # Pad the array to the max_len with zeros
-    if len(arr.shape) == 2:
+    if len(arr.shape) == 2:  # For T array
         padded_arr = np.zeros((arr.shape[0], max_len))
-    else:
+    else:  # For X and M arrays
         padded_arr = np.zeros((arr.shape[0], max_len, arr.shape[2]))
     padded_arr[:, :arr.shape[1]] = arr
     return padded_arr
 
-def prepare_data_for_primenet(T, X, M):
-    # Ensure T_expanded has the same shape as X and M
-    T_expanded = np.expand_dims(T, axis=2)
-    #T_expanded = np.tile(T_expanded, (1, 1, X.shape[2])) 
-    print(T_expanded.shape)
-    print(X.shape)
-    print(M.shape)
-    #assert T_expanded.shape == X.shape == M.shpe, f"Shapes do not match: T_expanded: {T_expanded.shape}, X: {X.shape}, M: {M.shape}"
-    
-    combined_data = np.concatenate((T_expanded, X, M), axis=2)
-    
-    num_samples = combined_data.shape[0]
-    print("Num samples:")
-    print(num_samples)
-    train_size = int(0.75 * num_samples)
-    print(train_size)
-    val_size = (num_samples - train_size) // 2  # Ensure we have a test set
-    print(val_size)
+def pad_sequences(data, mask, time, max_len, num_features):
+    padded_data = np.zeros((max_len, num_features))
+    padded_mask = np.zeros((max_len, num_features))
+    padded_time = np.zeros((max_len, 1))
 
-    train_data = combined_data[:train_size]
-    val_data = combined_data[train_size:train_size + val_size]
-    test_data = combined_data[train_size + val_size:]
+    padded_data[:data.shape[0], :] = data
+    padded_mask[:mask.shape[0], :] = mask
+    padded_time[:time.shape[0], 0] = time
 
-    labels = np.random.randint(0, 2, size=(num_samples,))
-    labels_train, labels_val, labels_test = labels[:train_size], labels[train_size:train_size + val_size], labels[train_size + val_size:]
+    return np.concatenate((padded_data, padded_mask, padded_time), axis=1)
 
-    os.makedirs('PrimeNet/data/pretrain', exist_ok=True)
-    os.makedirs('PrimeNet/data/finetune', exist_ok=True)
+def prepare_data_for_saving(data, max_len):
+    X_padded = []
+    labels = []
 
-    torch.save(torch.tensor(train_data, dtype=torch.float32), 'PrimeNet/data/pretrain/X_train.pt')
-    torch.save(torch.tensor(val_data, dtype=torch.float32), 'PrimeNet/data/pretrain/X_val.pt')
+    for record_id, tt, vals, mask, label in data:
+        if label is not None:
+            print(f"Before padding: vals shape = {vals.shape}, time shape = {tt.shape}, mask shape = {mask.shape}, label shape = {label.shape}")
+            combined_data = np.concatenate((vals, mask, tt[:, None]), axis=1)  # Concatenate vals, mask, and time as is
+            X_padded.append(combined_data)
+            print(label[4])
+            labels.append(label[4])
 
-    torch.save(torch.tensor(train_data, dtype=torch.float32), 'PrimeNet/data/finetune/X_train.pt')
-    torch.save(torch.tensor(val_data, dtype=torch.float32), 'PrimeNet/data/finetune/X_val.pt')
-    torch.save(torch.tensor(test_data, dtype=torch.float32), 'PrimeNet/data/finetune/X_test.pt')
+    # Convert lists to numpy arrays
+    X_padded = np.array(X_padded)
+    labels = np.array(labels)
 
-    torch.save(torch.tensor(labels_train, dtype=torch.long), 'PrimeNet/data/finetune/y_train.pt')
-    torch.save(torch.tensor(labels_val, dtype=torch.long), 'PrimeNet/data/finetune/y_val.pt')
-    torch.save(torch.tensor(labels_test, dtype=torch.long), 'PrimeNet/data/finetune/y_test.pt')
+    return X_padded, labels
 
-    print(f"Data generation and saving completed.")
-    print(f"X_train: {train_data.shape}")
-    print(f"X_val: {val_data.shape}")
-    print(f"X_test: {test_data.shape}")
+def save_data(X_train, y_train, X_val, y_val, X_test, y_test, output_dir):
+    os.makedirs(output_dir, exist_ok=True)
+
+    torch.save(torch.tensor(X_train, dtype=torch.float32), os.path.join(output_dir, 'X_train.pt'))
+    torch.save(torch.tensor(y_train, dtype=torch.long), os.path.join(output_dir, 'y_train.pt'))
+
+    torch.save(torch.tensor(X_val, dtype=torch.float32), os.path.join(output_dir, 'X_val.pt'))
+    torch.save(torch.tensor(y_val, dtype=torch.long), os.path.join(output_dir, 'y_val.pt'))
+
+    torch.save(torch.tensor(X_test, dtype=torch.float32), os.path.join(output_dir, 'X_test.pt'))
+    torch.save(torch.tensor(y_test, dtype=torch.long), os.path.join(output_dir, 'y_test.pt'))
+
+    print("Data saved successfully.")
 
 if __name__ == '__main__':
-    T_train = np.load("mTAN/src/T_train.npy")
-    X_train = np.load("mTAN/src/X_train.npy")
-    M_train = np.load("mTAN/src/M_train.npy")
-    T_test = np.load("mTAN/src/T_test.npy")
-    X_test = np.load("mTAN/src/X_test.npy")
-    M_test = np.load("mTAN/src/M_test.npy")
+    # Load the .pkl files instead of .npy files
+    with open("mTAN/src/train_data.pkl", 'rb') as f:
+        train_data = pickle.load(f)
+    with open("mTAN/src/test_data.pkl", 'rb') as f:
+        test_data = pickle.load(f)
+    with open("mTAN/src/val_data.pkl", 'rb') as f:
+        val_data = pickle.load(f)
+    record_id, tt, vals, mask, labels = train_data[0]
+    # Find the maximum length in the time dimension across all datasets
+    max_len_train = max([tt.shape[0] for _, tt, _, _, _ in train_data])
+    max_len_val = max([tt.shape[0] for _, tt, _, _, _ in val_data])
+    max_len_test = max([tt.shape[0] for _, tt, _, _, _ in test_data])
+    # Process the train, validation, and test data
+    X_train, y_train = prepare_data_for_saving(train_data, max_len_train)
+    X_test, y_test = prepare_data_for_saving(test_data, max_len_test)
+    X_val, y_val = prepare_data_for_saving(val_data, max_len_val)
 
-    # Find the maximum length in the time dimension
-    max_len = max(T_train.shape[1], T_test.shape[1])
+    # Print sizes of the datasets
+    print(f"Train Data: X_train shape = {X_train.shape}, y_train shape = {y_train.shape}")
+    print(f"Validation Data: X_val shape = {X_val.shape}, y_val shape = {y_val.shape}")
+    print(f"Test Data: X_test shape = {X_test.shape}, y_test shape = {y_test.shape}")
 
-    # Pad all arrays to the max length
-    T_train_padded = pad_array(T_train, max_len)
-    X_train_padded = pad_array(X_train, max_len)
-    M_train_padded = pad_array(M_train, max_len)
-    T_test_padded = pad_array(T_test, max_len)
-    X_test_padded = pad_array(X_test, max_len)
-    M_test_padded = pad_array(M_test, max_len)
-
-    # Concatenate the padded arrays
-    T = np.concatenate((T_train_padded, T_test_padded), axis=0)
-    X = np.concatenate((X_train_padded, X_test_padded), axis=0)
-    M = np.concatenate((M_train_padded, M_test_padded), axis=0)
-
-    print(f"Shapes - T: {T.shape}, X: {X.shape}, M: {M.shape}")
-    assert T.shape[0] == X.shape[0] == M.shape[0], "Number of samples in T, X, and M do not match."
-    assert X.shape[1] == M.shape[1], "Number of time steps in X and M do not match."
-
-    prepare_data_for_primenet(T, X, M)
+    # Save the data
+    save_data(X_train, y_train, X_val, y_val, X_test, y_test, 'PrimeNet/data/finetune/')
