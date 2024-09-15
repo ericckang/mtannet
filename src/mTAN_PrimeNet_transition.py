@@ -30,12 +30,22 @@ def prepare_data_for_saving(data, max_len):
     labels = []
 
     for record_id, tt, vals, mask, label in data:
-        if label is not None:
+        if label is not None and not np.isnan(label):
             print(f"Before padding: vals shape = {vals.shape}, time shape = {tt.shape}, mask shape = {mask.shape}, label shape = {label.shape}")
             combined_data = np.concatenate((vals, mask, tt[:, None]), axis=1)  # Concatenate vals, mask, and time as is
             X_padded.append(combined_data)
-            print(label[4])
-            labels.append(label[4])
+            print(label)
+            labels.append(label)
+        else:
+            # Handle missing labels appropriately
+            print(f"Missing label for record_id {record_id}. Assigning default label or skipping.")
+            # Option 1: Assign a default label (if appropriate)
+            # default_label = 0  # or any other default value
+            # labels.append(default_label)
+            # X_padded.append(combined_data)
+
+            # Option 2: Skip the sample
+            continue  # Skip samples with missing labels
 
     # Convert lists to numpy arrays
     X_padded = np.array(X_padded)
@@ -70,10 +80,11 @@ if __name__ == '__main__':
     max_len_train = max([tt.shape[0] for _, tt, _, _, _ in train_data])
     max_len_val = max([tt.shape[0] for _, tt, _, _, _ in val_data])
     max_len_test = max([tt.shape[0] for _, tt, _, _, _ in test_data])
+    max_len = max(max_len_train, max_len_val, max_len_test)
     # Process the train, validation, and test data
-    X_train, y_train = prepare_data_for_saving(train_data, max_len_train)
-    X_test, y_test = prepare_data_for_saving(test_data, max_len_test)
-    X_val, y_val = prepare_data_for_saving(val_data, max_len_val)
+    X_train, y_train = prepare_data_for_saving(train_data, max_len)
+    X_test, y_test = prepare_data_for_saving(test_data, max_len)
+    X_val, y_val = prepare_data_for_saving(val_data, max_len)
 
     # Print sizes of the datasets
     print(f"Train Data: X_train shape = {X_train.shape}, y_train shape = {y_train.shape}")

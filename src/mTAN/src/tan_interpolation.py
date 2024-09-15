@@ -167,26 +167,12 @@ if __name__ == '__main__':
         else:
             kl_coef = 1
 
-        for train_batch in train_loader:
-            print("Processing batch...")
-            #print("train_batch content:", train_batch)
-            data = train_batch[:, :, :-1]  # All features except the last one
-            labels = train_batch[:, :, -2].squeeze()  # The last feature
-
-            print(labels)
-            data = data.to(device)
-            labels = labels.to(device)
-            print(data.shape)
-            print(labels.shape)
-
+        for train_batch, _ in train_loader:
+            train_batch = train_batch.to(device)
             batch_len = train_batch.shape[0]
-            print("train batch shape:", train_batch.shape)
-
-            observed_data = data[:, :, :dim]
-            observed_mask = data[:, :, dim:2 * dim]
-            observed_tp = data[:, :, -1]
-
-
+            observed_data = train_batch[:, :, :dim]
+            observed_mask = train_batch[:, :, dim:2 * dim]
+            observed_tp = train_batch[:, :, -1]
             if args.sample_tp and args.sample_tp < 1:
                 subsampled_data, subsampled_tp, subsampled_mask = utils.subsample_timepoints(
                     observed_data.clone(), observed_tp.clone(), observed_mask.clone(), args.sample_tp)
@@ -196,6 +182,7 @@ if __name__ == '__main__':
             out = rec(torch.cat((subsampled_data, subsampled_mask), 2), subsampled_tp)
             qz0_mean = out[:, :, :args.latent_dim]
             qz0_logvar = out[:, :, args.latent_dim:]
+            # epsilon = torch.randn(qz0_mean.size()).to(device)
             epsilon = torch.randn(
                 args.k_iwae, qz0_mean.shape[0], qz0_mean.shape[1], qz0_mean.shape[2]
             ).to(device)
@@ -205,7 +192,9 @@ if __name__ == '__main__':
                 z0,
                 observed_tp[None, :, :].repeat(args.k_iwae, 1, 1).view(-1, observed_tp.shape[1])
             )
+            # nsample, batch, seqlen, dim
             pred_x = pred_x.view(args.k_iwae, batch_len, pred_x.shape[1], pred_x.shape[2])
+            # compute loss
             logpx, analytic_kl = utils.compute_losses(
                 dim, train_batch, qz0_mean, qz0_logvar, pred_x, args, device)
             loss = -(torch.logsumexp(logpx - kl_coef * analytic_kl, dim=0).mean(0) - np.log(args.k_iwae))
@@ -239,50 +228,44 @@ if __name__ == '__main__':
     def process_data_through_model(dataloader, model, decoder, dim):
         model.eval()
         all_data = []
-
+        total_record_id = 0  # Initialize total_record_id
         with torch.no_grad():
-            for record_id, train_batch in enumerate(dataloader):
+            for batch_idx, (train_batch, labels) in enumerate(dataloader):
                 batch_len = train_batch.shape[0]
-
-                # Assuming that the last feature is the label
-                data = train_batch[:, :, :-1]  # All features except the last one
-                labels = train_batch[:, :, -2].squeeze()  # Extract all labels (assuming label is the last feature)
-
-                # Move data and labels to the appropriate device
-                if labels is not None and len(labels) > 0:
-                    data = data.to(device)
-                    labels = labels.to(device)
-
-                    observed_data = data[:, :, :dim]
-                    observed_mask = data[:, :, dim:2 * dim]
-                    observed_tp = data[:, :, -1]
-
-                    out = model(torch.cat((observed_data, observed_mask), 2), observed_tp)
-                    qz0_mean = out[:, :, :args.latent_dim]
-                    qz0_logvar = out[:, :, args.latent_dim:]
-                    epsilon = torch.randn(
-                        1, qz0_mean.shape[0], qz0_mean.shape[1], qz0_mean.shape[2]
-                    ).to(device)
-                    z0 = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean
-                    z0 = z0.view(-1, qz0_mean.shape[1], qz0_mean.shape[2])
-
-                    pred_x = decoder(
-                        z0,
-                        observed_tp[None, :, :].repeat(1, 1, 1).view(-1, observed_tp.shape[1])
-                    )
-                    pred_x = pred_x.view(1, observed_data.shape[0], observed_data.shape[1], observed_data.shape[2]).mean(0)
-
-                    # Append structured data
-                    for i in range(batch_len):
-                        record = (record_id, observed_tp[i].cpu().numpy(), observed_data[i].cpu().numpy(), observed_mask[i].cpu().numpy(), labels[i].cpu().numpy())
-                        all_data.append(record)
-
+                train_batch = train_batch.to(device)
+                labels = labels.to(device)
+                observed_data = train_batch[:, :, :dim]
+                observed_mask = train_batch[:, :, dim:2 * dim]
+                observed_tp = train_batch[:, :, -1]
+                out = model(torch.cat((observed_data, observed_mask), 2), observed_tp)
+                qz0_mean = out[:, :, :args.latent_dim]
+                qz0_logvar = out[:, :, args.latent_dim:]
+                epsilon = torch.randn(
+                    1, qz0_mean.shape[0], qz0_mean.shape[1], qz0_mean.shape[2]
+                ).to(device)
+                z0 = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean
+                z0 = z0.view(-1, qz0_mean.shape[1], qz0_mean.shape[2])
+                pred_x = decoder(
+                    z0,
+                    observed_tp[None, :, :].repeat(1, 1, 1).view(-1, observed_tp.shape[1])
+                )
+                pred_x = pred_x.view(1, observed_data.shape[0], observed_data.shape[1], observed_data.shape[2]).mean(0)
+                # Append structured data
+                for i in range(batch_len):
+                    record_id = total_record_id
+                    total_record_id += 1
+                    tt = observed_tp[i].cpu().numpy()
+                    vals = observed_data[i].cpu().numpy()
+                    mask = observed_mask[i].cpu().numpy()
+                    label = labels[i].cpu().numpy()
+                    record = (record_id, tt, vals, mask, label)
+                    all_data.append(record)
         return all_data
 
 
     train_data = process_data_through_model(train_loader, rec, dec, dim)
     test_data = process_data_through_model(test_loader, rec, dec, dim)
-    val_data = process_data_through_model(val_loader, rec, dec, dim) if val_loader else None
+    val_data = process_data_through_model(val_loader, rec, dec, dim)
 
     # Save the data
     with open('train_data.pkl', 'wb') as f:

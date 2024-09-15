@@ -1,15 +1,13 @@
 # pylint: disable=E1101
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset, random_split
+from torch.utils.data import DataLoader, TensorDataset
 
 import numpy as np
 from physionet import PhysioNet, get_data_min_max, variable_time_collate_fn2
 from sklearn import model_selection
 from sklearn import metrics
 from person_activity import PersonActivity
-import pandas as pd
-from air_quality import AirQualityDataset, get_data_min_max, variable_time_collate_fn3
 
 
 def count_parameters(model):
@@ -56,7 +54,7 @@ def normalize_masked_data(data, mask, att_min, att_max):
     return data_norm, att_min, att_max
 
 
-def evaluate(dim, rec, dec, test_loader, args, num_sample=10, device="cpu"):
+def evaluate(dim, rec, dec, test_loader, args, num_sample=10, device="cuda"):
     mse, test_n = 0.0, 0.0
     with torch.no_grad():
         for test_batch in test_loader:
@@ -113,7 +111,7 @@ def compute_losses(dim, dec_train_batch, qz0_mean, qz0_logvar, pred_x, args, dev
 
 
 def evaluate_classifier(model, test_loader, dec=None, args=None, classifier=None,
-                        dim=41, device='cpu', reconst=False, num_sample=1):
+                        dim=41, device='cuda', reconst=False, num_sample=1):
     pred = []
     true = []
     test_loss = 0
@@ -237,122 +235,80 @@ def get_physionet_data(args, device, q, flag=1):
                                  quantization=q,
                                  download=True, n_samples=min(10000, args.n),
                                  device=device)
-
     total_dataset = train_dataset_obj[:len(train_dataset_obj)]
-
     if not args.classif:
-        # Concatenate samples from original Train and Test sets
-        total_dataset = total_dataset + test_dataset_obj[:len(test_dataset_obj)]
-    
+        total_dataset += test_dataset_obj[:len(test_dataset_obj)]
     print(len(total_dataset))
-    
-    # Split the dataset into train and test sets
     train_data, test_data = model_selection.train_test_split(total_dataset, train_size=0.8,
                                                              random_state=42, shuffle=True)
-
-    input_dim = train_data[0][2].size(-1)  # Get the input dimension from 'vals'
+    record_id, tt, vals, mask, labels = train_data[0]
+    input_dim = vals.size(-1)
     data_min, data_max = get_data_min_max(total_dataset, device)
     batch_size = min(min(len(train_dataset_obj), args.batch_size), args.n)
-    val_dataloader = None
 
-    if flag:
-        test_data_combined = variable_time_collate_fn(test_data, device, classify=args.classif,
-                                                      data_min=data_min, data_max=data_max)
+    # Always split train_data into training and validation sets
+    train_data, val_data = model_selection.train_test_split(train_data, train_size=0.8,
+                                                            random_state=11, shuffle=True)
 
-        # Split train_data into training and validation sets, even if not performing classification
-        train_data, val_data = model_selection.train_test_split(train_data, train_size=0.8,
-                                                                random_state=11, shuffle=True)
+    # Always get labels from variable_time_collate_fn
+    train_data_combined, train_labels = variable_time_collate_fn(
+        train_data, device, classify=args.classif, data_min=data_min, data_max=data_max)
+    val_data_combined, val_labels = variable_time_collate_fn(
+        val_data, device, classify=args.classif, data_min=data_min, data_max=data_max)
+    test_data_combined, test_labels = variable_time_collate_fn(
+        test_data, device, classify=args.classif, data_min=data_min, data_max=data_max)
 
-        # Prepare the combined training and validation data
-        train_data_combined = variable_time_collate_fn(
-            train_data, device, classify=args.classif, data_min=data_min, data_max=data_max)
-        val_data_combined = variable_time_collate_fn(
-            val_data, device, classify=args.classif, data_min=data_min, data_max=data_max)
+    # Create TensorDatasets including labels
+    train_data_combined = TensorDataset(train_data_combined, train_labels)
+    val_data_combined = TensorDataset(val_data_combined, val_labels)
+    test_data_combined = TensorDataset(test_data_combined, test_labels)
 
-        # Create DataLoader objects for train, validation, and test sets
-        train_dataloader = DataLoader(train_data_combined, batch_size=batch_size, shuffle=False)
-        val_dataloader = DataLoader(val_data_combined, batch_size=batch_size, shuffle=False)
-        test_dataloader = DataLoader(test_data_combined, batch_size=batch_size, shuffle=False)
-    else:
-        train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=False,
-                                      collate_fn=lambda batch: variable_time_collate_fn2(batch, args, device, data_type="train",
-                                                                                         data_min=data_min, data_max=data_max))
-        test_dataloader = DataLoader(test_data, batch_size=batch_size, shuffle=False,
-                                     collate_fn=lambda batch: variable_time_collate_fn2(batch, args, device, data_type="test",
-                                                                                        data_min=data_min, data_max=data_max))
+    train_dataloader = DataLoader(
+        train_data_combined, batch_size=batch_size, shuffle=False)
+    val_dataloader = DataLoader(
+        val_data_combined, batch_size=batch_size, shuffle=False)
+    test_dataloader = DataLoader(
+        test_data_combined, batch_size=batch_size, shuffle=False)
 
-    attr_names = train_dataset_obj.params
-    data_objects = {
-        "dataset_obj": train_dataset_obj,
-        "train_dataloader": train_dataloader,
-        "test_dataloader": test_dataloader,
-        "input_dim": input_dim,
-        "n_train_batches": len(train_dataloader),
-        "n_test_batches": len(test_dataloader),
-        "attr": attr_names,  # optional
-        "classif_per_tp": False,  # optional
-        "n_labels": 1  # optional
-    }
-    
-    if val_dataloader is not None:
-        data_objects["val_dataloader"] = val_dataloader
+    data_objects = {"train_dataloader": train_dataloader,
+                    "test_dataloader": test_dataloader,
+                    "val_dataloader": val_dataloader,
+                    "input_dim": input_dim}
 
     return data_objects
-
 
 
 def variable_time_collate_fn(batch, device=torch.device("cpu"), classify=False, activity=False,
                              data_min=None, data_max=None):
     """
-    Expects a batch of time series data in the form of (record_id, tt, vals, mask, labels) where
-      - record_id is a patient id
-      - tt is a 1-dimensional tensor containing T time values of observations.
-      - vals is a (T, D) tensor containing observed values for D variables.
-      - mask is a (T, D) tensor containing 1 where values were observed and 0 otherwise.
-      - labels is a list of labels for the current patient, if labels are available. Otherwise None.
-    Returns:
-      combined_tt: The union of all time observations.
-      combined_vals: (M, T, D) tensor containing the observed values.
-      combined_mask: (M, T, D) tensor containing 1 where values were observed and 0 otherwise.
+    Adjusted to always return labels.
     """
     D = batch[0][2].shape[1]
-    # number of labels
-    N = batch[0][-1].shape[1] if activity else 1
+    # Number of labels
+    N = 1
     len_tt = [ex[1].size(0) for ex in batch]
     maxlen = np.max(len_tt)
     enc_combined_tt = torch.zeros([len(batch), maxlen]).to(device)
     enc_combined_vals = torch.zeros([len(batch), maxlen, D]).to(device)
     enc_combined_mask = torch.zeros([len(batch), maxlen, D]).to(device)
-    if classify:
-        if activity:
-            combined_labels = torch.zeros([len(batch), maxlen, N]).to(device)
-        else:
-            combined_labels = torch.zeros([len(batch), N]).to(device)
-
+    combined_labels = torch.zeros(len(batch), N).to(device)
     for b, (record_id, tt, vals, mask, labels) in enumerate(batch):
         currlen = tt.size(0)
         enc_combined_tt[b, :currlen] = tt.to(device)
         enc_combined_vals[b, :currlen] = vals.to(device)
         enc_combined_mask[b, :currlen] = mask.to(device)
-        if classify:
-            if activity:
-                combined_labels[b, :currlen] = labels.to(device)
-            else:
-                combined_labels[b] = labels.to(device)
-
-    if not activity:
-        enc_combined_vals, _, _ = normalize_masked_data(enc_combined_vals, enc_combined_mask,
-                                                        att_min=data_min, att_max=data_max)
-
+        if labels is not None:
+            combined_labels[b] = labels.to(device)
+        else:
+            combined_labels[b] = torch.tensor(float('nan')).to(device)
+    enc_combined_vals, _, _ = normalize_masked_data(enc_combined_vals, enc_combined_mask,
+                                                    att_min=data_min, att_max=data_max)
     if torch.max(enc_combined_tt) != 0.:
         enc_combined_tt = enc_combined_tt / torch.max(enc_combined_tt)
-
     combined_data = torch.cat(
         (enc_combined_vals, enc_combined_mask, enc_combined_tt.unsqueeze(-1)), 2)
-    if classify:
-        return combined_data, combined_labels
-    else:
-        return combined_data
+    return combined_data, combined_labels
+
 
 def get_activity_data(args, device):
     n_samples = min(10000, args.n)
@@ -409,6 +365,7 @@ def get_activity_data(args, device):
                     # "attr": attr_names, #optional
                     "classif_per_tp": False,  # optional
                     "n_labels": 1}  # optional
+
     return data_objects
 
 
@@ -522,10 +479,6 @@ def kernel_smoother_data_gen(args, alpha=100., seed=0, ref_points=10):
                     "test_dataloader": test_dataloader,
                     "input_dim": 1,
                     "ground_truth": np.array(ground_truth)}
-
-    flattened_data = combined_data.reshape(-1, combined_data.shape[-1])
-    df = pd.DataFrame(flattened_data)
-    df.to_csv("kernel_smoother.csv", index=False)
     return data_objects
 
 
@@ -558,11 +511,6 @@ def get_toy_data(args):
                     "test_dataloader": test_dataloader,
                     "input_dim": dim,
                     "ground_truth": np.array(ground_truth)}
-    
-    # Save the combined_data to a CSV file
-    flattened_data = combined_data.reshape(-1, combined_data.shape[-1])
-    df = pd.DataFrame(flattened_data)
-    df.to_csv("toy_dataset.csv", index=False)
     return data_objects
 
 
@@ -687,55 +635,3 @@ def subsample_timepoints(data, time_steps, mask, percentage_tp_to_sample=None):
             mask[i, tp_to_set_to_zero] = 0.
 
     return data, time_steps, mask
-
-def get_air_quality_data(args, device, q=0.1):
-    # Load the air quality dataset
-    dataset = AirQualityDataset('AirQualityUCI_Irregular.csv', device=device)
-    
-    # Split dataset into training and test sets
-    n_samples = len(dataset)
-    train_size = int(0.8 * n_samples)
-    test_size = n_samples - train_size
-    train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
-    
-    # Further split the training set into training and validation sets
-    val_size = int(0.2 * train_size)
-    train_size = train_size - val_size
-    train_dataset, val_dataset = random_split(train_dataset, [train_size, val_size])
-    
-    # Calculate min and max values for normalization
-    data_min, data_max = get_data_min_max(train_dataset, device)
-    print("Data Min:", data_min)
-    print("Data Max:", data_max)
-    
-    # Define the data loaders
-    batch_size = args.batch_size
-    
-    train_dataloader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True,
-        collate_fn=lambda batch: variable_time_collate_fn3(batch, args, device, data_min=data_min, data_max=data_max)
-    )
-    
-    val_dataloader = DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=False,
-        collate_fn=lambda batch: variable_time_collate_fn3(batch, args, device, data_min=data_min, data_max=data_max)
-    )
-    
-    test_dataloader = DataLoader(
-        test_dataset, batch_size=batch_size, shuffle=False,
-        collate_fn=lambda batch: variable_time_collate_fn3(batch, args, device, data_min=data_min, data_max=data_max)
-    )
-    
-    data_objects = {
-        "train_dataloader": train_dataloader,
-        "val_dataloader": val_dataloader,
-        "test_dataloader": test_dataloader,
-        "input_dim": len(dataset.features),
-        "n_train_batches": len(train_dataloader),
-        "n_test_batches": len(test_dataloader),
-        "n_labels": 1  # Number of target labels
-    }
-    
-    return data_objects
-
-    
